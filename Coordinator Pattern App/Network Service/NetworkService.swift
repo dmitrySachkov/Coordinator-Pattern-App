@@ -8,6 +8,18 @@
 import SwiftUI
 import Foundation
 
+// MARK: - App Token
+struct AppToken {
+    static var bearerToken: String = "" {
+        didSet {
+            #if DEBUG
+            print("🔑 Token updated: \(bearerToken.isEmpty ? "EMPTY" : "SET")")
+            #endif
+        }
+    }
+}
+
+// MARK: - Multipart Form Data
 struct MultipartFormData {
     struct Part {
         let name: String
@@ -27,44 +39,29 @@ struct MultipartFormData {
     }
 }
 
+// MARK: - API Config
 struct APIConfig {
     static var baseURL: URL = URL(string: "https://api-develop.coralclub.online/api/v1")!
 
     static let staticHeaders: [String: String] = [
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+        "Accept": "application/json"
     ]
     
     static var defaultHeaders: [String: String] {
         var headers = staticHeaders
-        headers["Authorization"] = AppToken.bearerToken
+        if !AppToken.bearerToken.isEmpty {
+            headers["Authorization"] = AppToken.bearerToken
+        }
         return headers
     }
 }
 
+// MARK: - HTTP Method
 enum HTTPMethod: String {
     case GET, POST, PUT, DELETE, PATCH
 }
 
-protocol Endpoint {
-    var baseURL: URL { get }
-    var path: String { get }
-    var method: HTTPMethod { get }
-    var headers: [String: String]? { get }
-    var queryItems: [URLQueryItem]? { get }
-    var body: HTTPBody? { get }
-    var encodableBody: Encodable? { get }
-}
-
-// MARK: - Defaults
-extension Endpoint {
-    var baseURL: URL { APIConfig.baseURL }
-    var headers: [String: String]? { APIConfig.defaultHeaders }
-    var queryItems: [URLQueryItem]? { nil }
-    var body: HTTPBody? { nil }
-    var encodableBody: Encodable? { nil }
-}
-
+// MARK: - HTTP Body
 enum HTTPBody {
     case jsonEncodable(Encodable)
     case jsonObject([String: Any])
@@ -72,6 +69,31 @@ enum HTTPBody {
     case raw(Data, contentType: String)
 }
 
+// MARK: - Endpoint Protocol
+protocol Endpoint {
+    var baseURL: URL { get }
+    var path: String { get }
+    var method: HTTPMethod { get }
+    var headers: [String: String]? { get }
+    var queryItems: [URLQueryItem]? { get }
+    var body: HTTPBody? { get }
+    var requiresAuthentication: Bool { get }
+}
+
+// MARK: - Defaults
+extension Endpoint {
+    var baseURL: URL { APIConfig.baseURL }
+    
+    var headers: [String: String]? {
+        requiresAuthentication ? APIConfig.defaultHeaders : APIConfig.staticHeaders
+    }
+    
+    var queryItems: [URLQueryItem]? { nil }
+    var body: HTTPBody? { nil }
+    var requiresAuthentication: Bool { true }
+}
+
+// MARK: - Request Builder
 struct RequestBuilder {
     static func buildRequest(from endpoint: Endpoint) throws -> URLRequest {
         var url = endpoint.baseURL.appendingPathComponent(endpoint.path)
@@ -79,39 +101,54 @@ struct RequestBuilder {
         if let queryItems = endpoint.queryItems {
             var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
             components?.queryItems = queryItems
-            if let newURL = components?.url {
-                url = newURL
+            guard let newURL = components?.url else {
+                throw NetworkError.invalidRequest(reason: "Invalid query parameters")
             }
+            url = newURL
         }
         
         var request = URLRequest(url: url)
         request.httpMethod = endpoint.method.rawValue
+        
+        // Start with endpoint headers
         var headers = endpoint.headers ?? [:]
         
+        // Handle body and content-type
         if let body = endpoint.body {
-            switch body {
-            case .jsonEncodable(let encodable):
-                headers["Content-Type"] = "application/json"
-                request.httpBody = try JSONEncoder().encode(AnyEncodable(encodable))
-                
-            case .jsonObject(let obj):
-                headers["Content-Type"] = "application/json"
-                request.httpBody = try JSONSerialization.data(withJSONObject: obj, options: [])
-                
-            case .raw(let data, let contentType):
-                headers["Content-Type"] = contentType
-                request.httpBody = data
-                
-            case .multipart(let form):
-                let boundary = "Boundary-\(UUID().uuidString)"
-                headers["Content-Type"] = "multipart/form-data; boundary=\(boundary)"
-                request.httpBody = buildMultipartBody(form: form, boundary: boundary)
-            }
+            let (bodyData, contentType) = try buildBody(body)
+            request.httpBody = bodyData
+            headers["Content-Type"] = contentType
+        } else if headers["Content-Type"] == nil {
+            headers["Content-Type"] = "application/json"
         }
         
-        request.allHTTPHeaderFields = endpoint.headers
+        request.allHTTPHeaderFields = headers
+        
+        #if DEBUG
+        logRequest(request, endpoint: endpoint)
+        #endif
         
         return request
+    }
+    
+    private static func buildBody(_ body: HTTPBody) throws -> (Data, String) {
+        switch body {
+        case .jsonEncodable(let encodable):
+            let data = try JSONEncoder().encode(AnyEncodable(encodable))
+            return (data, "application/json")
+            
+        case .jsonObject(let obj):
+            let data = try JSONSerialization.data(withJSONObject: obj, options: [])
+            return (data, "application/json")
+            
+        case .raw(let data, let contentType):
+            return (data, contentType)
+            
+        case .multipart(let form):
+            let boundary = "Boundary-\(UUID().uuidString)"
+            let data = buildMultipartBody(form: form, boundary: boundary)
+            return (data, "multipart/form-data; boundary=\(boundary)")
+        }
     }
     
     private static func buildMultipartBody(form: MultipartFormData, boundary: String) -> Data {
@@ -119,26 +156,53 @@ struct RequestBuilder {
         let lineBreak = "\r\n"
         
         for part in form.parts {
-            body.append(Data("--\(boundary)\(lineBreak)".utf8))
+            body.append("--\(boundary)\(lineBreak)")
             
             if let filename = part.filename {
-                body.append(Data("Content-Disposition: form-data; name=\"\(part.name)\"; filename=\"\(filename)\"\(lineBreak)".utf8))
-                body.append(Data("Content-Type: \(part.mimeType ?? "application/octet-stream")\(lineBreak)\(lineBreak)".utf8))
-                body.append(part.data)
-                body.append(Data(lineBreak.utf8))
+                body.append("Content-Disposition: form-data; name=\"\(part.name)\"; filename=\"\(filename)\"\(lineBreak)")
+                body.append("Content-Type: \(part.mimeType ?? "application/octet-stream")\(lineBreak)\(lineBreak)")
             } else {
-                body.append(Data("Content-Disposition: form-data; name=\"\(part.name)\"\(lineBreak)\(lineBreak)".utf8))
-                body.append(part.data)
-                body.append(Data(lineBreak.utf8))
+                body.append("Content-Disposition: form-data; name=\"\(part.name)\"\(lineBreak)\(lineBreak)")
             }
+            
+            body.append(part.data)
+            body.append(lineBreak)
         }
         
-        body.append(Data("--\(boundary)--\(lineBreak)".utf8))
+        body.append("--\(boundary)--\(lineBreak)")
         return body
+    }
+    
+    #if DEBUG
+    private static func logRequest(_ request: URLRequest, endpoint: Endpoint) {
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("📡 \(request.httpMethod ?? "?") \(request.url?.absoluteString ?? "?")")
+        print("🔐 Requires Auth: \(endpoint.requiresAuthentication)")
+        if let headers = request.allHTTPHeaderFields, !headers.isEmpty {
+            print("📋 Headers:")
+            for (key, value) in headers.sorted(by: { $0.key < $1.key }) {
+                let displayValue = key == "Authorization" ? "Bearer ***" : value
+                print("   \(key): \(displayValue)")
+            }
+        }
+        if let body = request.httpBody, let bodyString = String(data: body, encoding: .utf8) {
+            print("📦 Body: \(bodyString.prefix(500))")
+        }
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    }
+    #endif
+}
+
+// MARK: - Data Extension
+private extension Data {
+    mutating func append(_ string: String) {
+        if let data = string.data(using: .utf8) {
+            append(data)
+        }
     }
 }
 
-// Wrapper for any Encodable
+// MARK: - AnyEncodable
 struct AnyEncodable: Encodable {
     private let encodeFunc: (Encoder) throws -> Void
     init<T: Encodable>(_ value: T) {
@@ -151,18 +215,18 @@ struct AnyEncodable: Encodable {
 enum NetworkError: LocalizedError, Equatable {
     case invalidRequest(reason: String?)
     case invalidResponse
-    case badRequest(message: String?)           // 400
-    case unauthorized(message: String?)         // 401
-    case forbidden(message: String?)            // 403
-    case notFound(message: String?)             // 404
-    case serverError(statusCode: Int, message: String?)  // 500+
+    case badRequest(message: String?)
+    case unauthorized(message: String?)
+    case forbidden(message: String?)
+    case notFound(message: String?)
+    case serverError(statusCode: Int, message: String?)
     case decodingError(description: String)
+    case encodingError(description: String)
     case urlSessionFailed(URLError)
     case timeout
     case noInternetConnection
     case unknownError(message: String?)
     
-    // MARK: - LocalizedError
     var errorDescription: String? {
         switch self {
         case .invalidRequest(let reason):
@@ -181,6 +245,8 @@ enum NetworkError: LocalizedError, Equatable {
             return "Server error (\(code)): \(message ?? "Internal server error")"
         case .decodingError(let description):
             return "Failed to decode response: \(description)"
+        case .encodingError(let description):
+            return "Failed to encode request: \(description)"
         case .urlSessionFailed(let urlError):
             return "Network error: \(urlError.localizedDescription)"
         case .timeout:
@@ -232,7 +298,6 @@ enum NetworkError: LocalizedError, Equatable {
         }
     }
     
-    // MARK: - Equatable
     static func == (lhs: NetworkError, rhs: NetworkError) -> Bool {
         switch (lhs, rhs) {
         case (.invalidRequest, .invalidRequest),
@@ -253,7 +318,6 @@ enum NetworkError: LocalizedError, Equatable {
         }
     }
     
-    // MARK: - Helper Properties
     var isRetryable: Bool {
         switch self {
         case .timeout, .noInternetConnection, .serverError:
@@ -286,12 +350,12 @@ enum NetworkError: LocalizedError, Equatable {
     }
 }
 
-// MARK: - Error Response Model
+// MARK: - Error Response
 struct ErrorResponse: Decodable {
     let message: String?
     let error: String?
     let detail: String?
-    let errors: [String: [String]]? // Field-specific errors
+    let errors: [String: [String]]?
     
     var displayMessage: String {
         if let message = message { return message }
@@ -304,12 +368,22 @@ struct ErrorResponse: Decodable {
     }
 }
 
-// MARK: - Updated NetworkManager
+// MARK: - Network Manager
 actor NetworkManager {
     static let shared = NetworkManager()
     
     private let urlSession: URLSession
-    private var cache: [String: Data] = [:]
+    private var cache: [String: CacheEntry] = [:]
+    
+    private struct CacheEntry {
+        let data: Data
+        let timestamp: Date
+        let ttl: TimeInterval
+        
+        var isExpired: Bool {
+            Date().timeIntervalSince(timestamp) > ttl
+        }
+    }
     
     private init() {
         let config = URLSessionConfiguration.default
@@ -322,18 +396,18 @@ actor NetworkManager {
     func request<T: Decodable>(
         _ endpoint: Endpoint,
         useCache: Bool = false,
+        cacheTTL: TimeInterval = 300, // 5 minutes default
         type: T.Type
     ) async throws -> T {
         
         let request = try RequestBuilder.buildRequest(from: endpoint)
         let cacheKey = request.cacheKey
         
-        // Return from cache
-        if useCache, let cachedData = cache[cacheKey] {
+        // Check cache
+        if useCache, let entry = cache[cacheKey], !entry.isExpired {
             do {
-                return try JSONDecoder().decode(T.self, from: cachedData)
+                return try decodeResponse(entry.data)
             } catch {
-                // Cache is corrupted, remove it and continue
                 cache.removeValue(forKey: cacheKey)
             }
         }
@@ -345,22 +419,22 @@ actor NetworkManager {
                 throw NetworkError.invalidResponse
             }
             
-            // Handle different status codes
+            #if DEBUG
+            logResponse(httpResponse, data: data)
+            #endif
+            
             try handleHTTPResponse(httpResponse, data: data)
             
-            // Save in cache only for successful responses
-            if useCache {
-                cache[cacheKey] = data
+            // Cache successful responses
+            if useCache && (200...299).contains(httpResponse.statusCode) {
+                cache[cacheKey] = CacheEntry(
+                    data: data,
+                    timestamp: Date(),
+                    ttl: cacheTTL
+                )
             }
             
-            // Decode response
-            do {
-                let decoder = JSONDecoder()
-                return try decoder.decode(T.self, from: data)
-            } catch {
-                let decodingDescription = getDecodingErrorDescription(error)
-                throw NetworkError.decodingError(description: decodingDescription)
-            }
+            return try decodeResponse(data)
             
         } catch let error as NetworkError {
             throw error
@@ -371,32 +445,37 @@ actor NetworkManager {
         }
     }
     
-    // MARK: - Response Handling
+    private func decodeResponse<T: Decodable>(_ data: Data) throws -> T {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            let description = getDecodingErrorDescription(error)
+            throw NetworkError.decodingError(description: description)
+        }
+    }
+    
     private func handleHTTPResponse(_ response: HTTPURLResponse, data: Data) throws {
         let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data)
         let message = errorResponse?.displayMessage
         
         switch response.statusCode {
         case 200...299:
-            return // Success
+            return
         case 400:
             throw NetworkError.badRequest(message: message)
         case 401:
-            // Post notification for logout
-            NotificationCenter.default.post(
-                name: .userUnauthorized,
-                object: nil
-            )
+            NotificationCenter.default.post(name: .userUnauthorized, object: nil)
             throw NetworkError.unauthorized(message: message)
         case 403:
             throw NetworkError.forbidden(message: message)
         case 404:
             throw NetworkError.notFound(message: message)
         case 500...599:
-            throw NetworkError.serverError(
-                statusCode: response.statusCode,
-                message: message
-            )
+            throw NetworkError.serverError(statusCode: response.statusCode, message: message)
         default:
             throw NetworkError.unknownError(message: message)
         }
@@ -422,24 +501,38 @@ actor NetworkManager {
         case .keyNotFound(let key, _):
             return "Missing key: '\(key.stringValue)'"
         case .typeMismatch(let type, let context):
-            return "Type mismatch for type '\(type)' at path: \(context.codingPath.map { $0.stringValue }.joined(separator: "."))"
+            let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+            return "Type mismatch for '\(type)' at: \(path)"
         case .valueNotFound(let type, let context):
-            return "Missing value for type '\(type)' at path: \(context.codingPath.map { $0.stringValue }.joined(separator: "."))"
+            let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+            return "Missing value for '\(type)' at: \(path)"
         case .dataCorrupted(let context):
-            return "Data corrupted at path: \(context.codingPath.map { $0.stringValue }.joined(separator: "."))"
+            let path = context.codingPath.map { $0.stringValue }.joined(separator: ".")
+            return "Data corrupted at: \(path)"
         @unknown default:
             return decodingError.localizedDescription
         }
     }
     
-    // MARK: - Cache Management
+    #if DEBUG
+    private func logResponse(_ response: HTTPURLResponse, data: Data) {
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("✅ Response: \(response.statusCode)")
+        if let json = try? JSONSerialization.jsonObject(with: data),
+           let prettyData = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted),
+           let prettyString = String(data: prettyData, encoding: .utf8) {
+            print("📦 Body:\n\(prettyString.prefix(1000))")
+        }
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+    }
+    #endif
+    
     func clearCache() {
         cache.removeAll()
     }
     
-    func clearCache(for endpoint: Endpoint) throws {
-        let request = try RequestBuilder.buildRequest(from: endpoint)
-        cache.removeValue(forKey: request.cacheKey)
+    func clearExpiredCache() {
+        cache = cache.filter { !$0.value.isExpired }
     }
 }
 
@@ -462,12 +555,10 @@ extension NetworkManager {
                 lastError = error
                 attempt += 1
                 
-                // Only retry for retryable errors
                 guard error.isRetryable && attempt <= maxRetries else {
                     throw error
                 }
                 
-                // Exponential backoff: 2^attempt seconds
                 let delay = pow(2.0, Double(attempt))
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 

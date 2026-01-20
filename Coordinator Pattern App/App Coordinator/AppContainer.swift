@@ -32,6 +32,7 @@ protocol AppContainerProtocol: AnyObject, Observable {
 @Observable
 class AppContainer: AppContainerProtocol {
     
+    let bearerTokenKey: String = "Bearer"
     var userState: UserState = .unauthorized
     var appState: AppState = .logIn
     var tabBarRouter: TabBarRouter = TabBarRouter()
@@ -40,20 +41,24 @@ class AppContainer: AppContainerProtocol {
     
     func start() async {
         var isSessionExists: Bool = false
+        AppToken.bearerToken = KeychainHelper.load(key: bearerTokenKey) ?? ""
         do {
             isSessionExists = try await checkSession()
         } catch {
             print("Error:", error)
         }
         
-        if !isSessionExists {
+        if isSessionExists {
+            appState = .mainTab
+            userState = .authorized
+        } else {
             await openSession()
         }
     }
     
     func logIn(with id: String, and password: String) async {
         let params = LoginParams(login: id, password: password)
-        let router = AuthenticationPostLoginRouter(bodyParameters: params)
+        let router = AuthenticationPostLoginRouter(params: params)
         
         do {
             let response = try await NetworkManager.shared.requestWithRetry(router,
@@ -67,13 +72,24 @@ class AppContainer: AppContainerProtocol {
         }
     }
     
+    func logOut() async {
+        do {
+            _ = try await NetworkManager.shared.requestWithRetry(AuthenticationDeleteSessionRouter(), type: APIResponse<AuthenticationBackendResponse>.self)
+            appState = .logIn
+            userState = .unauthorized
+        } catch {
+            print("Error:", error)
+        }
+    }
+    
     private func openSession() async {
         let sessionParams = SessionParams(applicationToken: "1ed753ba-a751-6616-a186-2f45ac2765d9", deliveryId: "RU", language: "ru", notificationToken: "notificationToken")
         
         do {
-            let response = try await NetworkManager.shared.requestWithRetry(AuthenticationPostSessionRouter(body: sessionParams), type: AuthenticationSessionResponse.self)
+            let response = try await NetworkManager.shared.requestWithRetry(AuthenticationPostSessionRouter(params: sessionParams), type: AuthenticationSessionResponse.self)
             
-            AppToken.bearerToken = response.data.type + " " + response.data.accessToken
+            AppToken.bearerToken = response.data.tokenType + " " + response.data.accessToken
+            KeychainHelper.save(key: bearerTokenKey, value: AppToken.bearerToken)
         } catch {
             print("Error openSession:", error)
         }
@@ -86,6 +102,7 @@ class AppContainer: AppContainerProtocol {
             return true
         } catch {
             print("Error:", error)
+            KeychainHelper.delete(key: bearerTokenKey)
             return false
         }
     }

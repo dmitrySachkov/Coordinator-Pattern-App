@@ -7,9 +7,9 @@
 
 import SwiftUI
 
-struct AppToken {
-    static var bearerToken = ""
-}
+//struct AppToken {
+//    static var bearerToken = ""
+//}
 
 
 struct APIResponse<T: Decodable>: Decodable {
@@ -39,15 +39,15 @@ struct AuthenticationSessionResponse: Decodable {
 }
 
 struct AuthenticationTokenBackendResponse: Decodable {
-    let type: String
-    let expires: Int
+    let tokenType: String
+    let expiresIn: Int
     let accessToken: String
     
-    enum CodingKeys: String, CodingKey {
-        case type = "token_type"
-        case expires = "expires_in"
-        case accessToken = "access_token"
-    }
+//    enum CodingKeys: String, CodingKey {
+//        case tokenType = "token_type"
+//        case expires = "expires_in"
+//        case accessToken = "access_token"
+//    }
 }
 
 struct SessionParams: Encodable {
@@ -103,51 +103,48 @@ extension Encodable {
 }
 
 struct AuthenticationCheckSessionRouter: Endpoint {
-//    typealias ReturnType = ResponseType<AuthenticationLoginResponse>
     var path: String = "/auth/session"
     var method: HTTPMethod = .GET
+    var requiresAuthentication: Bool { true }
 }
 
 struct AuthenticationPostSessionRouter: Endpoint {
-    //    typealias ReturnType = AuthenticationSessionResponse
+    let params: SessionParams
     var path: String = "/auth/session"
     var method: HTTPMethod = .POST
-    var bodyParameters: [String: Any]?
+    var body: HTTPBody? { .jsonEncodable(params) }
     var requiresAuthentication: Bool { false }
-    var headers: [String: String]? {
-        [
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        ]
-    }
     
-    init(body: SessionParams) {
-        self.bodyParameters = body.asDictionary
+    init(params: SessionParams) {
+        self.params = params
     }
 }
 
 struct AuthenticationDeleteSessionRouter: Endpoint {
-    typealias ReturnType = AuthenticationBackendResponse
     var path: String = "/auth/session"
     var method: HTTPMethod = .DELETE
-}
-
-struct AuthenticationPatchSessionRouter: Endpoint {
-    typealias ReturnType = AuthenticationSessionResponse
-    var path: String = "/auth/session"
-    var method: HTTPMethod = .PATCH
-    var bodyParameters: [String: Any]?
-    init(deliveryId: String, language: String) {
-        self.bodyParameters = ["deliveryId": deliveryId, "language": language]
+    var headers: [String: String]? {
+        var headers: [String: String] = [
+            "Accept": "*/*",
+            "Content-Type": "application/json"
+        ]
+        
+        if !AppToken.bearerToken.isEmpty {
+            headers["Authorization"] = AppToken.bearerToken
+        }
+        
+        return headers
     }
 }
 
 struct AuthenticationPostLoginRouter: Endpoint {
+    let params: LoginParams
     var path: String = "/auth/login"
     var method: HTTPMethod = .POST
-    var bodyParameters: [String: Any]?
-    init(bodyParameters: LoginParams) {
-        self.bodyParameters = bodyParameters.asDictionary
+    var body: HTTPBody? { .jsonEncodable(params) }
+    
+    init(params: LoginParams) {
+        self.params = params
     }
 }
 

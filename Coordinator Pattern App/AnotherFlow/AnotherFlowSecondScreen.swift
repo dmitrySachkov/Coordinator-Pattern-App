@@ -16,8 +16,9 @@ struct AnotherFlowSecondScreen: View {
             Text("AnotherFlowSecondScreen")
             
             Button {
-                appContainer.userState = .unauthorized
-                appContainer.appState = .logIn
+                Task {
+                    await appContainer.logOut()
+                }
             } label: {
                 Text("Log out")
                     .foregroundStyle(.white)

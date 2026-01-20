@@ -35,7 +35,7 @@ enum FirstNavigationRouter: Coordinatable, RouteFactory {
     var body: some View {
         switch self {
         case .mainScreen(let container):
-            MainScreen(appContainer: container)
+            MainScreen(viewModel: AppViewModel(), appContainer: container)
         case .secondScreen(let container):
             SecondMainScreen(appContainer: container)
         case .thirdScreen(let container):

@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct MainScreen: View {
+    @State var viewModel: AppViewModelProtocol
     @Bindable var appContainer: AppContainer
     @Environment(Navigator<FirstNavigationRouter>.self) private var navigator
     let someName: String = "Dmitry"
@@ -41,14 +42,14 @@ struct MainScreen: View {
             }
         }
         .task {
-            
+            await viewModel.getMainPageData()
         }
     }
 }
 
 #Preview {
     NavigationStack {
-        MainScreen(appContainer: AppContainer())
+        MainScreen(viewModel: AppViewModel(), appContainer: AppContainer())
             .environment(Navigator<FirstNavigationRouter>())
     }
 }
